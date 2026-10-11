@@ -26,8 +26,10 @@ compares them with sportsbook lines. Streamlit entry point: `model.py`. CLI: `py
 ## Findings so far (2026-10)
 - The game models trail the closing moneyline by ~0.015 log-loss; standard tweaks (EWMA reset, opponent
   adjustment, Elo tuning, recency weights, margin-based win prob, pass/rush matchup features) were all within noise.
-- Most promising untested ideas: play-by-play features (success rate, early-down EPA, garbage-time filtered),
-  better ratings for backup / new QBs.
+- Play-by-play features (success rate, early-down EPA; garbage time = wp outside 10-90% or last 2 min of a half;
+  EWMA half-life 6) tested 2026-10-11: no gain for moneyline or spread (all |z| < 2), worse for totals (z +2.2 to
+  +3.0, also as summed both-team ratings). Not adopted.
+- Most promising untested idea: better ratings for backup / new QBs.
 
 ## Style
 Dense code: short helpers, several statements per line are normal here. Match the surrounding code; don't
