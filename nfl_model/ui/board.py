@@ -38,10 +38,12 @@ def clean_odds(o, default=-110):
     return int(round(o))
 
 
-# How much of the model's disagreement with the sportsbook has held up on past seasons (walk-forward 2015+).
+# How much of the model's disagreement with the sportsbook has held up on past seasons.
 # 1.0 = believe the model fully, 0 = believe the sportsbook. Recompute with: python -m nfl_model.ui.calibrate
-# Props have no price history to test against, so they get a cautious assumed value.
-TRUST = {"Moneyline": 0.40, "Spread": 0.20, "Total": 0.55, "prop": 0.50}
+# Checked walk-forward from 2017: blending the moneyline and spread models in did not beat the book's own chance
+# out of sample, so both are 0; totals did. Props have no price history to test against, so they get a cautious
+# assumed value.
+TRUST = {"Moneyline": 0.0, "Spread": 0.0, "Total": 0.56, "prop": 0.50}
 
 
 def _logit(p):
@@ -67,7 +69,7 @@ def side(p_win: float, p_loss: float, odds, other_odds=None, trust: float = 1.0,
         ob = float(implied_prob(clean_odds(other_odds)))
         fair = be / (be + ob)
     p = float(1 / (1 + np.exp(-(_logit(fair) + trust * (_logit(raw) - _logit(fair))))))
-    return dict(odds=odds, p_win=p, p_raw=float(raw), breakeven=be, edge=p - be,
+    return dict(odds=odds, p_win=p, p_raw=float(raw), fair=float(fair), breakeven=be, edge=p - be,
                 ev=float(live * (p * american_to_decimal(odds) - 1)))
 
 
@@ -349,6 +351,48 @@ def top_bets(bets: list[dict], n: int = 10) -> list[dict]:
             continue
         seen.add(key); out.append(b)
         if len(out) == n:
+            break
+    return out
+
+
+# ------------------------------------------------------------------ parlays ----
+PARLAY_POOL = 8          # best legs a parlay may draw from
+
+
+def parlay_legs(bets: list[dict]) -> list[dict]:
+    """Legs the model prices above break-even, at most one per game. Two legs from one game move together (a
+    team's spread and its game's over, a QB's yards and his team's total), and the model has no measure of how much,
+    so same-game legs are left out rather than priced as if independent. Moneyline underdogs stay out, as on Home."""
+    good = sorted([b for b in bets if b["ev"] > 0 and b.get("game_id") and not is_moneyline_underdog(b)],
+                  key=lambda b: b["ev"], reverse=True)
+    seen, out = set(), []
+    for b in good:
+        if b["game_id"] not in seen:
+            seen.add(b["game_id"]); out.append(b)
+    return out[:PARLAY_POOL]
+
+
+def parlay(legs: list[dict]) -> dict:
+    """Price and expected return of legs from different games. Sportsbooks pay the product of the legs' decimal
+    odds, and a pushed leg drops out (its factor becomes 1), so for independent legs the expected return per unit
+    is exactly the product of each leg's (1 + ev)."""
+    dec = float(np.prod([american_to_decimal(b["odds"]) for b in legs]))
+    p = float(np.prod([b["p_win"] for b in legs]))
+    odds = int(round((dec - 1) * 100)) if dec >= 2 else int(round(-100 / (dec - 1)))
+    return dict(legs=legs, decimal=dec, odds=odds, p_win=p, breakeven=1 / dec,
+                ev=float(np.prod([1 + b["ev"] for b in legs])) - 1)
+
+
+def best_parlays(bets: list[dict], n_legs: int, k: int = 3) -> list[dict]:
+    """Up to `k` parlays of `n_legs` legs with the highest expected return, sharing no legs, so they can all be bet."""
+    from itertools import combinations
+    pool = sorted((parlay(list(c)) for c in combinations(parlay_legs(bets), n_legs)), key=lambda x: x["ev"], reverse=True)
+    out, used = [], set()
+    for p in pool:
+        ids = {id(b) for b in p["legs"]}
+        if not ids & used:
+            out.append(p); used |= ids
+        if len(out) == k:
             break
     return out
 

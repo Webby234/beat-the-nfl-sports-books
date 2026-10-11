@@ -38,6 +38,27 @@ def test_live_prices_flow_into_picks():
     assert (cands.market_prob.sum() - 2.0) < 1e-9 and abs(cands.groupby("side").market_prob.first().sum() - 1) < 1e-9
 
 
+def test_prop_lines_one_real_two_way_price_per_player():
+    from nfl_model.betting.live_props import parse_props
+    o = lambda side, who, price, point: {"name": side, "description": who, "price": price, "point": point}
+    ev = {"id": "e1", "commence_time": "2026-10-11T17:00:00Z", "bookmakers": [
+        {"key": "smallbook", "markets": [{"key": "player_pass_yds", "outcomes": [
+            o("Over", "Joe Burrow", -105, 262.5), o("Under", "Joe Burrow", -125, 262.5)]}]},
+        {"key": "fanduel", "markets": [
+            {"key": "player_pass_yds", "outcomes": [o("Over", "Joe Burrow", -110, 259.5), o("Under", "Joe Burrow", -110, 259.5)]},
+            {"key": "player_rush_yds", "outcomes": [o("Over", "Chase Brown", -115, 55.5), o("Under", "Chase Brown", -105, 54.5)]},
+            {"key": "player_pass_tds", "outcomes": [o("Over", "Joe Burrow", -150, 1.5), o("Under", "Joe Burrow", 120, 1.5)]}]},
+        {"key": "draftkings", "markets": [{"key": "player_rush_yds", "outcomes": [
+            o("Over", "Chase Brown", -110, 56.5), o("Under", "Chase Brown", -110, 56.5), o("Over", "Only Over", -110, 9.5)]}]}]}
+    d = parse_props(ev).set_index(["stat", "player"])
+    assert len(d) == 2                                                   # unknown market, one-sided offer dropped
+    b = d.loc[("qb_pass_yds", "Joe Burrow")]
+    assert b.book == "fanduel" and b.line == 259.5 and b.over_odds == -110   # preferred book wins over smallbook
+    c = d.loc[("rush_yds", "Chase Brown")]
+    assert c.book == "draftkings" and c.line == 56.5                     # fanduel's mismatched lines are not a pair
+
+
 if __name__ == "__main__":
     test_parse_and_best_prices(); print("PASS test_parse_and_best_prices")
     test_live_prices_flow_into_picks(); print("PASS test_live_prices_flow_into_picks")
+    test_prop_lines_one_real_two_way_price_per_player(); print("PASS test_prop_lines_one_real_two_way_price_per_player")

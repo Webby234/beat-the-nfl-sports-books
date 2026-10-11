@@ -12,8 +12,10 @@ Run from the project root, in this order (each writes to `reports/`; later steps
 2. `python -m nfl_model bets`
 3. `python -m nfl_model ablation`
 4. `python -m nfl_model lines`
-5. `python -m nfl_model props`
+5. `python -m nfl_model props backtest --stat all`
 6. `python -m nfl_model.ui.calibrate`  (writes ui_trust.csv)
+7. `python -m nfl_model parlays`  (writes parlays_backtest.csv, which the Parlays page reads; uses TRUST, so run it
+   again if TRUST changes)
 
 Then:
 

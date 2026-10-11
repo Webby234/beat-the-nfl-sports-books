@@ -4,7 +4,10 @@
   bets       betting simulation: ROI by edge threshold, Kelly sim       (writes reports/)
   ablation   do QB / injury features help? (same-window paired comparisons)   (writes reports/)
   picks      edges and recommended bets for the next slate of games
-  test       run the unit + leakage tests
+  log        log this week's picks (and Odds API prop lines with --props); run by the scheduled GitHub Action
+  track      grade logged picks; --dir log to grade the Action's bet-log branch checkout
+  parlays    long-run record of the Parlays page's picks                (writes reports/)
+  test      run the unit + leakage tests
 """
 from __future__ import annotations
 
@@ -210,18 +213,66 @@ def cmd_props(args) -> None:
 
 
 def cmd_track(args) -> None:
-    """Grade the picks the app has logged (lines/picks_log.csv) -> reports/picks_graded.csv"""
+    """Grade the logged picks (picks_log.csv in --dir, default lines/) -> reports/picks_graded.csv"""
+    from pathlib import Path
     from .data import load_games, load_skill_games
     from .ui import tracker
-    picks = tracker.load()
+    picks = tracker.load(Path(args.dir) / "picks_log.csv")
     if picks.empty:
-        print("No picks logged yet. Open the app (streamlit run model.py) before the games to log the week's list."); return
-    graded = tracker.grade(picks, load_games(), load_skill_games())
+        print("No picks logged yet. Open the app locally or let the GitHub Action run before the games."); return
+    games, skill = load_games(), load_skill_games()
+    graded = tracker.grade(picks, games, skill)
     graded.to_csv(REPORT_DIR / "picks_graded.csv", index=False)
     summ = tracker.summarize(graded)
     print(f"{len(graded)} picks logged, {graded.result.notna().sum()} settled.")
     print(summ.to_string(index=False) if len(summ) else "Nothing settled yet.")
+    hist = tracker.load(Path(args.dir) / "picks_history.csv")
+    if len(hist):
+        snap = tracker.by_snapshot(tracker.grade(hist, games, skill))
+        if len(snap):
+            print("\nBy snapshot day (does logging early get better numbers? CLV against the same close):")
+            print(snap.to_string(index=False))
     print("\nA few weeks is noise: it takes hundreds of bets to tell skill from luck.")
+
+
+def cmd_log(args) -> None:
+    """Log this week's Home list (and priced prop lines) without the app: what the scheduled GitHub Action runs,
+    because the hosted app has no disk that survives a restart. Writes picks_log.csv (latest snapshot per game, what
+    gets graded) and appends to picks_history.csv (every snapshot) and prop_lines_history.csv in --dir."""
+    from pathlib import Path
+    from .data import load_games
+    from .ui import board as B, tracker
+    out = Path(args.dir)
+    board = B.build_board()
+    if not board["games"]:
+        print("No upcoming games with lines yet; nothing logged."); return
+    lines = pd.DataFrame(columns=["stat", "player", "line", "over_odds", "under_odds"])
+    if args.props:
+        from .betting.live_props import fetch_prop_lines
+        g = load_games(); g = g[(g.season == board["season"]) & (g.week == board["week"])]
+        until = pd.Timestamp(g.gameday.max()).tz_localize("UTC") + pd.Timedelta(days=1, hours=12)   # covers Monday night
+        try:
+            lines = fetch_prop_lines(until)
+            snap = lines.assign(season=board["season"], week=board["week"], fetched_at=pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d %H:%M"))
+            hist = out / "prop_lines_history.csv"
+            out.mkdir(parents=True, exist_ok=True)
+            pd.concat([pd.read_csv(hist) if hist.exists() else None, snap], ignore_index=True).to_csv(hist, index=False)
+            print(f"{len(lines)} prop lines fetched.")
+        except Exception as e:                       # never lose the game picks because the prop feed failed
+            print(f"Prop lines skipped: {e}")
+    prop_bets = B.price_prop_lines(board["props"], lines, board["games"])
+    top = B.top_bets(B.game_bets(board["games"]) + prop_bets)
+    n = tracker.log(board, top, prop_bets, path=out / "picks_log.csv", history=out / "picks_history.csv")
+    print(f"Logged {n} picks for {board['season']} week {board['week']} ({len(prop_bets) // 2} prop lines priced).")
+
+
+def cmd_parlays(args) -> None:
+    """Long-run record of the Parlays page's picks -> reports/parlays_backtest.csv (the page reads it)."""
+    from .ui.history import parlay_report
+    r = parlay_report()
+    r.to_csv(REPORT_DIR / "parlays_backtest.csv", index=False)
+    print(r.round(3).to_string(index=False))
+    print("\nlegs=1 is the same pool of legs bet one at a time: the yardstick a parlay has to beat.")
 
 
 def cmd_test(args) -> None:
@@ -234,7 +285,7 @@ def main(argv=None) -> None:
     ap = argparse.ArgumentParser(prog="python -m nfl_model", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name, fn in (("backtest", cmd_backtest), ("bets", cmd_bets), ("ablation", cmd_ablation), ("picks", cmd_picks), ("check", cmd_check), ("lines", cmd_lines), ("linepicks", cmd_linepicks), ("props", cmd_props), ("track", cmd_track), ("test", cmd_test)):
+    for name, fn in (("backtest", cmd_backtest), ("bets", cmd_bets), ("ablation", cmd_ablation), ("picks", cmd_picks), ("check", cmd_check), ("lines", cmd_lines), ("linepicks", cmd_linepicks), ("props", cmd_props), ("track", cmd_track), ("log", cmd_log), ("parlays", cmd_parlays), ("test", cmd_test)):
         p = sub.add_parser(name)
         p.set_defaults(fn=fn)
         if name in ("backtest", "bets", "picks"):
@@ -248,6 +299,10 @@ def main(argv=None) -> None:
             p.add_argument("--week", type=int)
             p.add_argument("--file")
             p.add_argument("--min-edge", type=float, default=0.03)
+        if name in ("log", "track"):
+            p.add_argument("--dir", default="lines", help="where the log files live (the Action uses the bet-log branch)")
+        if name == "log":
+            p.add_argument("--props", action="store_true", help="also fetch prop lines from The Odds API (needs ODDS_API_KEY)")
         if name == "linepicks":
             p.add_argument("--week", type=int)
             p.add_argument("--min-edge", type=float, default=1.0)

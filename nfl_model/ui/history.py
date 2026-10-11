@@ -142,6 +142,57 @@ def td_table(d: pd.DataFrame, current: int) -> pd.DataFrame:
     return _by_period(d, current, fn)
 
 
+def past_parlays(bets: pd.DataFrame) -> pd.DataFrame:
+    """The Parlays page's picks for each past week (2 and 3 legs, up to 3 of each), graded at closing prices.
+    A pushed leg drops out, as sportsbooks settle it; one lost leg loses the parlay."""
+    rows = []
+    for (s, wk), x in bets.groupby(["season", "week"]):
+        legs = x.to_dict("records")
+        for n in (2, 3):
+            for p in B.best_parlays(legs, n):
+                res = [b["result"] for b in p["legs"]]
+                if any(r not in ("win", "loss", "push") for r in res):
+                    continue
+                pay = np.prod([B.american_to_decimal(b["odds"]) if r == "win" else 1.0 for b, r in zip(p["legs"], res)])
+                profit = -1.0 if "loss" in res else float(pay) - 1
+                rows.append(dict(season=s, week=wk, n=n, profit=profit, won="loss" not in res and profit > 0,
+                                 expected=p["p_win"]))
+    return pd.DataFrame(rows, columns=["season", "week", "n", "profit", "won", "expected"])
+
+
+def parlay_report(first: int = 2015, seed: int = 0) -> pd.DataFrame:
+    """Long-run record behind the Parlays page (python -m nfl_model parlays -> reports/parlays_backtest.csv): the
+    page's 2- and 3-leg parlays every week since `first`, against betting the same legs one at a time."""
+    df = load_feature_table()
+    last = int(df[(df.game_type == "REG") & df.home_score.notna()].season.max())
+    bets = pd.concat([past_line_bets(df, s) for s in range(first, last + 1)], ignore_index=True)
+    pool = pd.concat([pd.DataFrame(B.parlay_legs(x.to_dict("records"))) for _, x in bets.groupby(["season", "week"])])
+    pool = pool[pool.result.isin(["win", "loss", "push"])]
+    p = past_parlays(bets)
+    rng = np.random.default_rng(seed)
+    rows = []
+    for legs, profit, won, exp in ((1, pool.profit, pool.result == "win", pool.p_win),
+                                   *((n, p[p.n == n].profit, p[p.n == n].won, p[p.n == n].expected) for n in (2, 3))):
+        v = profit.to_numpy(float)
+        bs = [rng.choice(v, len(v)).mean() for _ in range(2000)]
+        rows.append(dict(legs=legs, bets=len(v), win_rate=float(won.mean()), expected=float(exp.mean()), roi=float(v.mean()),
+                         lo=float(np.percentile(bs, 2.5)), hi=float(np.percentile(bs, 97.5)), first=first, last=last,
+                         share_totals=float((pool.market == "Total").mean())))
+    return pd.DataFrame(rows)
+
+
+def parlay_table(d: pd.DataFrame, current: int) -> pd.DataFrame:
+    def fn(x):
+        out = {}
+        for n in (2, 3):
+            y = x[x.n == n]
+            out[f"{n}-leg won"] = f"{int(y.won.sum())} of {len(y)}" if len(y) else "-"
+            out[f"{n}-leg expected"] = f"{y.expected.sum():.1f}" if len(y) else "-"
+            out[f"{n}-leg profit"] = f"{y.profit.sum():+.1f}" if len(y) else "-"
+        return out
+    return _by_period(d, current, fn)
+
+
 def teaser_table(legs: pd.DataFrame, current: int) -> pd.DataFrame:
     def fn(x):
         w = x.won.dropna()
@@ -165,7 +216,8 @@ def build(current: int | None = None, progress=None) -> dict:
     out = {"season": current, "Home": home_table(bets, current), "Moneyline & Spread": lines_table(bets, current),
            "Touchdowns": td_table(props["anytime_td"], current), "Passing touchdowns": count_table(props["pass_tds"], current),
            "Receptions": count_table(props["receptions"], current),
-           "Teasers": teaser_table(B.teaser_history(load_games()), current)}
+           "Teasers": teaser_table(B.teaser_history(load_games()), current),
+           "Parlays": parlay_table(past_parlays(bets), current)}
     for k, title in YARD_STATS.items():
         out[title] = yards_table(props[k], current)
     return out
@@ -175,7 +227,7 @@ def load_or_build(progress=None) -> dict:
     """Rebuilt only when a new game has finished; otherwise read from the cache on disk."""
     g = load_games()
     done = g[(g.game_type == "REG") & g.home_score.notna()]
-    key = (int(done.season.max()), int(len(done)), 5)          # last number: bump when the tables change shape
+    key = (int(done.season.max()), int(len(done)), 7)          # last number: bump when the tables change shape
     if CACHE.exists():
         try:
             saved = pickle.loads(CACHE.read_bytes())

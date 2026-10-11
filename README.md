@@ -102,17 +102,18 @@ The first start after each week's games also takes about a minute longer while t
 3. **Enter prop lines** (optional). On Player Props and Touchdowns, open "Add your sportsbook's lines" and type the
    line and odds next to a player. Props only appear on the Home list after you do this, because there is no free
    source of prop prices.
-4. **Check the Teasers tab** for qualifying legs and the price you need.
+4. **Check the Parlays and Teasers tabs.** Parlays are built only from bets that clear break-even, one leg per
+   game. Teasers lists qualifying legs and the price you need.
 5. **After the games,** open the Accuracy tab, or run `python -m nfl_model track`, to see how the picks did.
 
 ## How to read the pages
 
-**The meter on Home.** The yellow line is how often a bet must win to break even at that price. The dot is how
-often the model expects it to win. Green past the line is edge. Grey means the bet falls short of break-even.
+**The meter on Home.** The orange line is how often a bet must win to break even at that price. The dot is how
+often the model expects it to win. Blue past the line is edge. Grey means the bet falls short of break-even.
 
 **Odds** are American odds. `-110` means you bet 110 to win 100. `+150` means you bet 100 to win 150.
 
-**Green boxes on Moneyline & Spread** mark the model's pick in each market. A yellow **Value** chip marks any
+**Blue boxes on Moneyline & Spread** mark the model's pick in each market. An orange **Value** chip marks any
 side whose price pays more than the model's win chance requires. On a moneyline the pick and the value can be
 different teams: the model can expect the favorite to win while the underdog's price is the better bet.
 
@@ -120,6 +121,10 @@ different teams: the model can expect the favorite to win while the underdog's p
 lower, under if it is higher.
 
 **Fair price** on Touchdowns is the break-even odds. A sportsbook paying more than that is a price the model likes.
+
+**Parlays** show what the parlay pays, the model's chance it hits, the chance it needs to break even, and its
+expected return. On past seasons they did no better than betting the same legs one at a time
+(`reports/parlays_backtest.csv`, from `python -m nfl_model parlays`), and they swing far more.
 
 **Home spread** in the lines table is the home team's number as a sportsbook shows it: `-2.5` means the home team
 is favored by 2.5.
@@ -137,13 +142,34 @@ How the hosted version differs from running it yourself:
 
 - **Lines are private to each visitor.** Numbers someone types in stay in their own browser tab and are cleared when
   they close it. One visitor never changes the board for another.
-- **Nothing is saved on the host.** The pick log is not written there. If `lines/picks_log.csv` is in the repository,
-  the hosted app shows the record from it, so you can keep the log on your own computer and publish it with the code.
+- **Nothing is saved on the host.** The host's disk is wiped whenever the app restarts, so the hosted app never
+  writes the pick log. A scheduled GitHub Action keeps it instead (see below), and the hosted app shows its record
+  from there. Until the Action has run, it falls back to `lines/picks_log.csv` if that is in the repository.
 - **It sleeps.** After 12 hours without visitors the app goes to sleep. The next visitor clicks to wake it and waits
   a few minutes.
 - **Memory.** The app peaks at roughly 450 MB while building the week's board.
 
 To try hosted behavior on your own computer, set the environment variable `NFL_BOARD_HOSTED=1` before starting the app.
+
+### Keeping a track record while hosted (free)
+
+`.github/workflows/log-picks.yml` logs the week's picks on a schedule, whether or not anyone opens the app:
+Wednesday 14:00 UTC (early-week lines) and Sunday 15:00 UTC (before the 1 PM ET games). It saves them to a
+`bet-log` branch of the repository. The app follows `main`, so these saves do not restart it. GitHub Actions are free
+for public repositories.
+
+- **Turn it on.** Push the workflow to `main`. On GitHub, open **Actions → Log picks → Run workflow** once to check it.
+- **Prop prices (optional).** Sign up for a free key at <https://the-odds-api.com>. On GitHub, open
+  **Settings → Secrets and variables → Actions → New repository secret**, name it `ODDS_API_KEY` and paste the
+  key. The Sunday run then also records passing, rushing and receiving yards and receptions lines from one sportsbook,
+  about 60 of the free tier's 500 monthly credits a week. Without a key, only game picks are logged.
+- **What it keeps.** `picks_log.csv` holds the last price logged before each game, which is what gets graded.
+  `picks_history.csv` holds every snapshot, so Wednesday and Sunday prices can be compared.
+  `prop_lines_history.csv` holds the prop lines.
+- **Read the results.** Download the branch, or run `git fetch origin bet-log && git worktree add log origin/bet-log`,
+  then run `python -m nfl_model track --dir log`.
+- **GitHub pauses schedules** in repositories with no activity for 60 days. If the record stops growing, check the
+  Actions tab and re-enable the workflow there.
 
 ## Command line reference
 
@@ -152,7 +178,8 @@ Everything the app shows, and the tests behind it, can also be run from a termin
 | Command | What it does |
 |---|---|
 | `streamlit run model.py` | Start the app. |
-| `python -m nfl_model track` | Grade the picks the app has logged. Writes `reports/picks_graded.csv`. |
+| `python -m nfl_model track [--dir log]` | Grade the logged picks. Writes `reports/picks_graded.csv`. |
+| `python -m nfl_model log [--dir log] [--props]` | Log this week's picks without the app (what the GitHub Action runs). |
 | `python -m nfl_model check` | Check the downloaded data for problems. |
 | `python -m nfl_model test` | Run every test (about five minutes on a fresh download). |
 | `python -m nfl_model picks [--week N] [--min-edge 0.03]` | Moneyline picks for the upcoming week. |
@@ -163,6 +190,7 @@ Everything the app shows, and the tests behind it, can also be run from a termin
 | `python -m nfl_model backtest` | Test the win-probability models on past seasons. |
 | `python -m nfl_model bets` | Simulate moneyline betting on past seasons. |
 | `python -m nfl_model lines` | Test the spread and total models on past seasons. |
+| `python -m nfl_model parlays` | Test the Parlays page's picks on past seasons. |
 | `python -m nfl_model ablation` | Test whether quarterback and injury inputs help. |
 | `python -m nfl_model.ui.calibrate` | Recompute how far win chances are pulled toward the sportsbook. |
 | `python -m nfl_model.ui.preview out.html` | Write a static copy of the app's pages. |
@@ -197,7 +225,9 @@ A prop lines file is a CSV with the columns `player,line,over_odds,under_odds`. 
 4. **Comparing with the sportsbook.** Every bet is reduced to the same numbers: the model's win chance, the win
    rate needed to break even, and the gap between them (the edge).
 5. **Staying humble.** On past seasons most of the model's disagreement with the sportsbook did not hold up. So
-   the win chances shown are pulled toward the sportsbook's, by an amount measured for each market.
+   the win chances shown are pulled toward the sportsbook's, by an amount measured for each market on seasons the
+   measurement had not seen. For moneylines and spreads that amount is all the way: there the model only finds value
+   when your sportsbook's line or price is better than the market's.
 6. **Testing without hindsight.** Every result in the Accuracy tab and in `reports/` comes from a model that had
    only seen earlier seasons. A dedicated test fails if any input uses information from the game it is predicting.
 
@@ -209,9 +239,9 @@ Tested on seasons the models had not seen (2015 to 2026).
 |---|---|
 | Picking winners | About as accurate as the sportsbook's own odds, not better. |
 | Spreads | Model picks win about 50%. Break-even at `-110` is 52.4%. |
-| Totals | Model picks win about 52%. Not clearly different from break-even. |
-| Home list, top ten | +3.3% per bet since 2015, with a margin of error of about 2 points either way. |
-| Home list, best three | +7.4% per bet since 2015, with a margin of error of about 4 points either way. |
+| Totals | Model picks win about 51%. Not clearly different from break-even. |
+| Home list, top ten (games) | +3.2% per bet since 2015, with a margin of error of about 2 points either way. Almost all totals. |
+| Home list, best three (games) | +2.5% per bet since 2015, with a margin of error of about 4 points either way. |
 | Passing yards | Average miss about 58 yards, against about 60 for a recent-form average. |
 | Rushing yards | Average miss about 23.7 yards, against 24.8 for a recent-form average. |
 | Receiving yards | Average miss about 24.6 yards, against 25.0 for a recent-form average. |
@@ -278,11 +308,13 @@ minutes when the data has to be downloaded first.
 
 - **No proven edge.** Nothing in the app has been shown to beat sportsbooks to the usual statistical standard.
 - **One source of lines.** Listed lines come from one free source, not from your sportsbook. Enter your own to compare.
-- **No prop prices.** There is no free history of prop lines, so props are tested on outcomes, not on profit.
+- **No prop prices.** There is no free history of prop lines, so props are tested on outcomes, not on profit. The
+  GitHub Action starts collecting them (with a free Odds API key). After about 300 settled props,
+  `python -m nfl_model.ui.calibrate` measures prop trust on real prices.
 - **Who is playing.** Player lists come from recent games. Check injury reports and inactives yourself.
 - **Regular season only.** Playoff games are not covered.
-- **No live odds feed.** Code for an optional feed exists in `nfl_model/betting/live_odds.py`, but it needs an
-  account key and has not been run against the real service.
+- **No live odds feed in the app.** Code for the optional feed (`nfl_model/betting/live_odds.py`,
+  `live_props.py`) needs an account key. It is tested only on sample responses until the Action runs with a key.
 
 ## Data and credits
 

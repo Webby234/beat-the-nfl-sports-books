@@ -126,7 +126,7 @@ def test_past_weeks_are_scored_from_earlier_seasons_only():
 
 
 def _game(spread_home=2.5, total=44.5):
-    res = np.arange(-20.0, 21.0)
+    res = np.random.default_rng(0).normal(0.0, 13.0, 4000)      # continuous, like real model residuals
     g = dict(game_id="g1", matchup="A at H", kickoff="Sun", home="NYG", away="ARI", home_name="Giants", away_name="Cardinals",
              season=2026, week=4, yours=False,
              listed=dict(away_ml=-140, home_ml=120, home_spread=spread_home, away_spread_odds=-110, home_spread_odds=-110,
@@ -215,6 +215,92 @@ def test_grading_every_market():
     assert tracker.record_line(g[g.game_id == "g2"]) == ""
 
 
+def _leg(game, ev, odds=-110, market="Total", **kw):
+    return dict(dict(game_id=game, market=market, odds=odds, p_win=(1 + ev) / B.american_to_decimal(odds), ev=ev,
+                     pick=f"leg {game}", team=None, matchup="A at B", kickoff="Sun"), **kw)
+
+
+def test_parlays_use_value_legs_from_different_games_and_price_like_a_sportsbook():
+    legs = [_leg("g1", .05), _leg("g1", .04, market="Rushing yards", player="RB"),       # same game as the best leg
+            _leg("g2", .03), _leg("g3", .02), _leg("g4", -.01),                        # g4 does not clear break-even
+            _leg("g5", .10, odds=150, market="Moneyline", team="NYG")]                   # moneyline underdog: left out
+    pool = B.parlay_legs(legs)
+    assert [b["game_id"] for b in pool] == ["g1", "g2", "g3"] and pool[0]["ev"] == .05
+    p = B.parlay(pool[:2])
+    assert abs(p["decimal"] - (210 / 110) ** 2) < 1e-9 and p["odds"] == 264
+    assert abs(p["ev"] - (1.05 * 1.03 - 1)) < 1e-9 and abs(p["breakeven"] - 1 / p["decimal"]) < 1e-12
+    two = B.best_parlays(legs, 2)
+    assert len(two) == 1 and {b["game_id"] for b in two[0]["legs"]} == {"g1", "g2"}   # a second would reuse a leg
+    assert B.best_parlays(legs, 4) == []
+
+
+def test_past_parlays_grade_pushes_and_losses_like_a_sportsbook():
+    from nfl_model.ui import history as H
+    rows = [dict(_leg(g, ev), season=2025, week=1, result=r) for g, ev, r in
+            (("g1", .05, "win"), ("g2", .04, "push"), ("g3", .03, "win"), ("g4", .02, "loss"))]
+    p = H.past_parlays(pd.DataFrame(rows)).set_index("n")
+    d = 210 / 110
+    two = H.past_parlays(pd.DataFrame(rows[:2]))                                   # win + push: paid as a single
+    assert len(two) == 1 and abs(two.profit.iloc[0] - (d - 1)) < 1e-9 and two.won.iloc[0]
+    assert abs(p.loc[3, "profit"] - (d * d - 1)) < 1e-9                              # win, push, win: a 2-leg winner
+    assert len(p.loc[2]) == 2                                                       # g1+g2 and g3+g4, no shared legs
+    lost = H.past_parlays(pd.DataFrame([rows[0], rows[3]]))
+    assert lost.profit.iloc[0] == -1.0 and not lost.won.iloc[0]
+    t = H.parlay_table(H.past_parlays(pd.DataFrame(rows)), 2025)
+    assert "2-leg won" in t.columns and t.iloc[0, 0] == "Week 1"
+
+
+def test_site_chrome_and_parlay_markup():
+    assert R.asset_uri("logo_mark.webp").startswith("data:image/webp;base64,") and R.asset_uri("missing.png") == ""
+    for out in (R.brand_bar(), R.footer(), R.hero("k", "Week 5", "picks", "sub <x>", [("14", "games")], "now"),
+                R.explore([("Parlays", "two & three")])):
+        assert "\n" not in out
+    assert "sub &lt;x&gt;" in R.hero("k", "Week 5", "picks", "sub <x>", [])
+    p = B.parlay([_leg("g1", .05), _leg("g2", .03)])
+    html = R.parlay_list([p], [], 2)
+    assert "+264" in html and "Parlay 1" in html and "clears" in html and "expected return" in html
+    assert "Not enough bets" in R.parlay_list([], [], 3)
+    f = pd.DataFrame(dict(legs=[1, 2, 3], bets=[100, 40, 30], win_rate=[.52, .27, .14], expected=[.52, .28, .15],
+                          roi=[.03, 0.0, .03], lo=[-.02, -.15, -.2], hi=[.09, .16, .3], first=2015, last=2026))
+    facts = R.parlay_facts(f)
+    assert "single bets" in facts and "27%" in facts and R.parlay_facts(None) == ""
+    top = [dict(_leg("g1", .05), pick="Under 44.5", breakeven=.524, edge=.02)]
+    assert "NO. 1" in R.featured(top, []) and "No games with posted lines" in R.featured([], [])
+
+
+def test_closing_line_value_per_market():
+    games = pd.DataFrame(dict(game_id=["g1"], home_score=[27.0], away_score=[24.0], spread_line=[4.0], total_line=[49.0],
+                              home_moneyline=[-200], away_moneyline=[170]))
+    skill = pd.DataFrame(columns=["season", "week", "player_id", "rushing_tds", "receiving_tds"])
+    picks = pd.DataFrame([
+        _pick(line=3.0),                                                # home -3, closed -4: got 1 point better
+        _pick(side="away", line=3.0),                                   # away +3, closed +4: 1 point worse
+        _pick(market="Total", side="under", line=50.5),                 # under 50.5, closed 49: 1.5 better
+        _pick(market="Moneyline", side="home", line=None, odds=-150),   # -150 bet, closed -200
+        _pick(market="Rushing yards", stat="rush_yds", player_id="p1", side="over", line=79.5),
+    ])
+    c = tracker.grade(picks, games, skill).clv.tolist()
+    assert c[0] == 1.0 and c[1] == -1.0 and c[2] == 1.5 and pd.isna(c[4])
+    h, a = 200 / 300, 100 / 270
+    assert abs(c[3] - (h / (h + a) - 0.6)) < 1e-9 and c[3] > 0                   # the close made -150 a good price
+    assert "mean_clv" in tracker.summarize(tracker.grade(picks, games, skill)).columns
+
+
+def test_prop_trust_waits_for_enough_bets_then_checks_week_by_week():
+    from nfl_model.ui import calibrate as C
+    assert C.prop_trust(pd.DataFrame(dict(market=["Rushing yards"], result=["win"], season=2026, week=1,
+                                          p_raw=0.6, fair=0.5))) is None
+    rng = np.random.default_rng(0)
+    n = 1500
+    fair, p_raw = rng.uniform(0.35, 0.65, n), rng.uniform(0.25, 0.75, n)
+    z = lambda p: np.log(p / (1 - p))
+    p_true = 1 / (1 + np.exp(-(z(fair) + 0.6 * (z(p_raw) - z(fair)))))
+    d = pd.DataFrame(dict(market="Rushing yards", season=2026, week=np.repeat(np.arange(1, 16), 100), p_raw=p_raw,
+                          fair=fair, result=np.where(rng.random(n) < p_true, "win", "loss")))
+    r = C.prop_trust(pd.concat([d, d.head(50).assign(market="Total")]))        # game markets are left out
+    assert r["n"] == n and r["n_oos"] == 11 * 100 and 0.3 < r["trust"] < 0.9
+
+
 def test_log_keeps_finished_games_and_replaces_live_ones():
     import pathlib, tempfile
     old = tracker.PATH
@@ -232,6 +318,42 @@ def test_log_keeps_finished_games_and_replaces_live_ones():
         assert got.set_index("pick").loc["prop"].isna()["rank"]
     finally:
         tracker.PATH = old
+
+
+def test_scheduled_log_keeps_every_snapshot_and_compares_them():
+    import pathlib, tempfile
+    tmp = pathlib.Path(tempfile.mkdtemp()) / "log"
+    path, hist = tmp / "picks_log.csv", tmp / "picks_history.csv"
+    board = dict(season=2026, week=4, games=[dict(game_id="g1")])
+    tracker.log(board, [_pick(line=3.0, pick="wed")], [], path=path, history=hist)
+    tracker.log(board, [_pick(line=4.5, pick="sun")], [], path=path, history=hist)
+    assert tracker.load(path).pick.tolist() == ["sun"]                   # graded: the last price before the game
+    h = tracker.load(hist)
+    assert h.pick.tolist() == ["wed", "sun"]
+    h["logged_at"] = ["2026-10-07 14:00", "2026-10-11 15:00"]
+    games = pd.DataFrame(dict(game_id=["g1"], home_score=[27.0], away_score=[24.0], spread_line=[4.0]))
+    no_skill = pd.DataFrame(columns=["season", "week", "player_id", "rushing_tds", "receiving_tds"])
+    s = tracker.by_snapshot(tracker.grade(h, games, no_skill)).set_index("snapshot")
+    assert s.loc["Wednesday", "mean_clv"] == 1.0 and s.loc["Sunday", "mean_clv"] == -0.5      # home -3 beat a -4 close
+    assert s.loc["Wednesday", "roi"] == 0.0 and s.loc["Sunday", "roi"] == -1.0                 # push, then a loss at -4.5
+
+
+def test_hosted_app_reads_the_log_from_the_bet_log_branch():
+    import importlib, os, pathlib, tempfile
+    from nfl_model import config
+    assert tracker.LOG_URL.endswith("/bet-log/picks_log.csv")
+    old = (os.environ.get("NFL_BOARD_HOSTED"), os.environ.get("NFL_BOARD_LOG_URL"))
+    try:
+        os.environ["NFL_BOARD_HOSTED"], os.environ["NFL_BOARD_LOG_URL"] = "1", "file:///nonexistent/picks_log.csv"
+        importlib.reload(config); T = importlib.reload(tracker)
+        T.PATH = pathlib.Path(tempfile.mkdtemp()) / "picks_log.csv"
+        assert T.load().empty and list(T.load().columns) == T.COLS      # unreachable log: empty, never an error
+        pd.DataFrame([_pick(pick="from repo")]).to_csv(T.PATH, index=False)
+        assert T.load().pick.tolist() == ["from repo"]                  # before the first Action run: the repo's copy
+    finally:
+        for k, v in zip(("NFL_BOARD_HOSTED", "NFL_BOARD_LOG_URL"), old):
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+        importlib.reload(config); importlib.reload(tracker)
 
 
 def test_hosted_lines_stay_in_the_visitors_session_and_off_the_disk():
@@ -277,6 +399,33 @@ def test_timestamp_uses_no_platform_specific_codes():
     assert B._stamp(pd.Timestamp("2026-10-12 00:05")) == "Oct 12, 12:05 AM"
     for mod in (B, R, lines_store, tracker):
         assert "%-" not in inspect.getsource(mod).replace("%-d / %-I", "")     # these break strftime on Windows
+
+
+def _trust_data(true_trust, seasons=range(2012, 2027), n=400, seed=0):
+    rng = np.random.default_rng(seed)
+    rows = []
+    for s in seasons:
+        market, gap = rng.normal(0, 1, n), rng.normal(0, 0.4, n)
+        p = 1 / (1 + np.exp(-(market + true_trust * gap)))
+        rows.append(pd.DataFrame(dict(season=s, market=market, gap=gap, y=(rng.random(n) < p).astype(float))))
+    return pd.concat(rows, ignore_index=True)
+
+
+def test_trust_is_checked_on_seasons_the_fit_never_saw():
+    from nfl_model.ui import calibrate as C
+    d = _trust_data(0.6)
+    wf = C.walk_forward(d, first=2017)
+    assert wf.season.min() == 2017 and wf.season.nunique() == 10
+    # the 2017 trust can only come from 2012-2016
+    assert abs(wf[wf.season == 2017].trust.iloc[0] - C.fit_trust(d[d.season < 2017])) < 1e-12
+
+
+def test_trust_kept_only_when_the_model_helped_out_of_sample():
+    from nfl_model.ui import calibrate as C
+    useful = C.summarize(_trust_data(0.6), n_boot=20)
+    assert useful["oos_gain_x1000"] > 0 and 0.3 < useful["trust"] < 0.9
+    noise = C.summarize(_trust_data(0.0, seed=1), n_boot=20)
+    assert noise["oos_gain_x1000"] < 0 and noise["trust"] == 0.0
 
 
 if __name__ == "__main__":

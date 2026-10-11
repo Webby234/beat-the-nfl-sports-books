@@ -29,7 +29,14 @@ compares them with sportsbook lines. Streamlit entry point: `model.py`. CLI: `py
 - Play-by-play features (success rate, early-down EPA; garbage time = wp outside 10-90% or last 2 min of a half;
   EWMA half-life 6) tested 2026-10-11: no gain for moneyline or spread (all |z| < 2), worse for totals (z +2.2 to
   +3.0, also as summed both-team ratings). Not adopted.
-- Most promising untested idea: better ratings for backup / new QBs.
+- Early-week totals (5-8 days out) are where an edge shows: with *actual* gameday weather (an upper bound) bets
+  >=1 pt off the line returned +9.4% (CI +1.6 to +17.1) with 0.56 pts CLV, vs +6.0% / 0.23 without weather. Real
+  Open-Meteo forecasts (previous-runs API, only from 2024) on 2024-26: totals MSE -0.97 (z -1.56), no CLV gain.
+  Not adopted; Open-Meteo keeps the archive, so re-run when 2026-27 add games.
+- The market prices QB changes ~fully (lines_move_attribution: 99%), so backup-QB ratings are low value for betting.
+- Bet tracking (`ui/tracker.py`) logs CLV and the inputs prop trust needs (`calibrate.prop_trust`, >=300 props).
+  The hosted app writes nothing; `.github/workflows/log-picks.yml` runs `python -m nfl_model log` Wed + Sun and
+  commits to the `bet-log` branch (props via a free `ODDS_API_KEY` secret); the hosted app reads its record there.
 
 ## Style
 Dense code: short helpers, several statements per line are normal here. Match the surrounding code; don't

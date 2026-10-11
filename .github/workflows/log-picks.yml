@@ -1,0 +1,76 @@
+# Log the board's picks on a schedule, because the hosted app has no disk that survives a restart.
+# Results go to the bet-log branch (commits there do not redeploy the app, which follows main);
+# the app reads its track record from that branch. Free: public repos have unlimited Actions minutes.
+#
+# Wednesday 14:00 UTC  early-week lines (game picks only)
+# Sunday    15:00 UTC  before the 1 PM ET kickoffs (game picks + prop lines from The Odds API, if ODDS_API_KEY is set)
+# GitHub may start scheduled runs late by a few minutes up to about an hour.
+name: Log picks
+
+on:
+  schedule:
+    - cron: "0 14 * * 3"
+    - cron: "0 15 * * 0"
+  workflow_dispatch:
+    inputs:
+      props:
+        description: "Also fetch prop lines (uses Odds API credits)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: log-picks
+  cancel-in-progress: false
+
+jobs:
+  log:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Restore downloaded nflverse data
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: nflverse-${{ github.run_id }}
+          restore-keys: nflverse-
+
+      - name: Check out the bet-log branch (created on the first run)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir log && cd log && git init -q
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git fetch -q --depth 1 origin bet-log; then git checkout -q -b bet-log FETCH_HEAD; else git checkout -q --orphan bet-log; fi
+
+      - name: Log this week's picks
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          WANT_PROPS: ${{ github.event.schedule == '0 15 * * 0' || inputs.props == true }}
+        run: |
+          if [ "$WANT_PROPS" = "true" ] && [ -n "$ODDS_API_KEY" ]; then
+            python -m nfl_model log --dir log --props
+          else
+            python -m nfl_model log --dir log
+          fi
+
+      - name: Save to the bet-log branch
+        run: |
+          cd log
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then echo "Nothing new to log."; exit 0; fi
+          git commit -q -m "Log picks $(date -u +'%Y-%m-%d %H:%M') UTC"
+          git push -q origin bet-log
